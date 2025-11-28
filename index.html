@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Top-Down Mini Adventure</title>
+  <style>
+    :root {
+      font-family: "Trebuchet MS", Arial, sans-serif;
+      background: #1b1600;
+      color: #fff7c2;
+    }
+
+    body {
+      margin: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+
+    canvas {
+      border: 3px solid #ffe066;
+      border-radius: 8px;
+      image-rendering: pixelated;
+      background: radial-gradient(circle at 20% 20%, #4f3c00, #120d00 65%);
+      box-shadow: 0 0 30px rgba(0, 0, 0, 0.6);
+    }
+
+    .overlay {
+      position: fixed;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 1rem;
+      padding: 0.55rem 1.1rem;
+      background: rgba(90, 70, 0, 0.9);
+      border: 1px solid rgba(255, 224, 102, 0.7);
+      border-radius: 10px;
+      font-size: 0.95rem;
+      letter-spacing: 0.04em;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.6);
+      text-transform: uppercase;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game" width="720" height="480" aria-label="Top-down adventure"></canvas>
+  <div class="overlay">
+    <span id="score">Score: 0</span>
+    <span id="lives">Lives: 3</span>
+    <span id="message">Eat every gemstone: Diamond &gt; Ruby &gt; Sapphire &gt; Emerald.</span>
+  </div>
+  <script>
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+
+    const scoreEl = document.getElementById("score");
+    const livesEl = document.getElementById("lives");
+    const messageEl = document.getElementById("message");
+
+    const tileSize = 48;
+    const cols = canvas.width / tileSize;
+    const rows = canvas.height / tileSize;
+
+    const baseLayout = [
+      "###############",
+      "#.....#.......#",
+      "#.###.#.###.#.#",
+      "#.#...#.....#.#",
+      "#.#.#.###.#.#.#",
+      "#...#.....#...#",
+      "#.#####.#.###.#",
+      "#.......#.....#",
+      "#.###.#.###.#.#",
+      "###############",
+    ];
+
+    const gemTypes = [
+      { name: "Diamond", value: 150, color: "#b5ddff", weight: 1, radius: 9 },
+      { name: "Ruby", value: 90, color: "#70b7ff", weight: 2, radius: 8 },
+      { name: "Sapphire", value: 60, color: "#4a9dff", weight: 3, radius: 7 },
+      { name: "Emerald", value: 40, color: "#2e7bff", weight: 4, radius: 7 },
+    ];
+    const totalGemWeight = gemTypes.reduce((sum, gem) => sum + gem.weight, 0);
+
+    const colors = {
+      floor: "#302400",
+      wall: "#6a5200",
+      wallEdge: "#ffdf5d",
+      pacman: "#ffe45e",
+      ghostEye: "#fff",
+      ghostPupil: "#151c3c",
+    };
+
+    const playerStart = { x: 1, y: 1 };
+    const ghostSpawns = [
+      { x: 7, y: 4, color: "#ff4d4d" },
+      { x: 7, y: 5, color: "#ff4d4d" },
+      { x: 8, y: 5, color: "#ff4d4d" },
+    ];
+
+    const DIRS = [
+      { x: 1, y: 0 },
+      { x: -1, y: 0 },
+      { x: 0, y: 1 },
+      { x: 0, y: -1 },
+    ];
+
+    const POWER_DURATION = 600;
+    const APPLE_RESPAWN = 900;
+    const GHOST_EAT_SCORE = 200;
+
+    let board = [];
+    const gemMap = new Map();
+    let ghosts = [];
+
+    const player = {
+      x: 0,
+      y: 0,
+      size: 24,
+      speed: 2.8,
+      dirX: 1,
+      dirY: 0,
+      pendingDir: null,
+      facingX: 1,
+      facingY: 0,
+    };
+
+    const apple = {
+      tile: { x: 11, y: 2 },
+      phase: 0,
+      bob: 0,
+      spin: 0,
+      available: true,
+      respawnTimer: 0,
+    };
+
+    const cat = {
+      tile: { x: 3, y: 7 },
+      phase: 0,
+      tail: 0,
+      blinkTimer: 180,
+      eyesClosed: false,
+    };
+
+    const banana = {
+      tile: { x: 11, y: 6 },
+      sway: 0,
+      sipTimer: 140,
+      sipping: false,
+    };
+
+    const keyToDir = {
+      ArrowUp: { x: 0, y: -1 },
+      ArrowDown: { x: 0, y: 1 },
+      ArrowLeft: { x: -1, y: 0 },
+      ArrowRight: { x: 1, y: 0 },
+      w: { x: 0, y: -1 },
+      s: { x: 0, y: 1 },
+      a: { x: -1, y: 0 },
+      d: { x: 1, y: 0 },
+    };
+
+    const state = {
+      score: 0,
+      lives: 3,
+      mode: "play",
+      message: "",
+      powerTimer: 0,
+    };
+
+    const defaultMessage = "Eat gems. Grab the apple to chomp ghosts!";
+    let messageTimer = 0;
+    let lastTime = 0;
+    let mouthTicker = 0;
+    let hitCooldown = 0;
+
+    function createBoard() {
+      return baseLayout.map((row) => row.split(""));
+    }
+
+    function rollGemType() {
+      let roll = Math.random() * totalGemWeight;
+      for (const gem of gemTypes) {
+        roll -= gem.weight;
+        if (roll <= 0) {
+          return { ...gem };
+        }
+      }
+      return { ...gemTypes[gemTypes.length - 1] };
+    }
+
+    function populateGems() {
+      gemMap.clear();
+      board = createBoard();
+      for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+          if (board[y][x] === ".") {
+            board[y][x] = " ";
+            gemMap.set(`${x},${y}`, rollGemType());
+          }
+        }
+      }
+    }
+
+    function tileToPixel(tileCoord) {
+      return tileCoord * tileSize + tileSize / 2;
+    }
+
+    function snapToTileCenter(value) {
+      return Math.floor(value / tileSize) * tileSize + tileSize / 2;
+    }
+
+    function resetPlayer() {
+      player.x = tileToPixel(playerStart.x);
+      player.y = tileToPixel(playerStart.y);
+      player.dirX = 1;
+      player.dirY = 0;
+      player.pendingDir = null;
+      player.facingX = 1;
+      player.facingY = 0;
+    }
+
+    function resetGhosts() {
+      ghosts = ghostSpawns.map((spawn, idx) => ({
+        x: tileToPixel(spawn.x),
+        y: tileToPixel(spawn.y),
+        homeX: spawn.x,
+        homeY: spawn.y,
+        color: spawn.color,
+        size: 26,
+        speed: 2 + idx * 0.15,
+        dirX: idx % 2 === 0 ? 1 : -1,
+        dirY: idx % 2 ? 1 : 0,
+      }));
+    }
+
+    function respawnGhost(ghost) {
+      ghost.x = tileToPixel(ghost.homeX);
+      ghost.y = tileToPixel(ghost.homeY);
+      ghost.dirX = Math.random() > 0.5 ? 1 : -1;
+      ghost.dirY = 0;
+    }
+
+    function resetPositions() {
+      resetPlayer();
+      resetGhosts();
+    }
+
+    function resetApple() {
+      apple.available = true;
+      apple.respawnTimer = 0;
+      apple.phase = 0;
+      apple.bob = 0;
+      apple.spin = 0;
+    }
+
+    function setMessage(text, duration = 150) {
+      state.message = text;
+      messageTimer = duration;
+      updateHUD();
+    }
+
+    function updateHUD() {
+      scoreEl.textContent = `Score: ${state.score}`;
+      livesEl.textContent = `Lives: ${state.lives}`;
+      messageEl.textContent = state.message || defaultMessage;
+    }
+
+    function startNewGame() {
+      state.score = 0;
+      state.lives = 3;
+      state.mode = "play";
+      state.powerTimer = 0;
+      populateGems();
+      resetPositions();
+      resetApple();
+      setMessage(defaultMessage, 0);
+    }
+
+    function getTileCoord(x, y) {
+      return {
+        x: Math.floor(x / tileSize),
+        y: Math.floor(y / tileSize),
+      };
+    }
+
+    function isWallTile(tx, ty) {
+      if (ty < 0 || ty >= rows || tx < 0 || tx >= cols) {
+        return true;
+      }
+      return board[ty][tx] === "#";
+    }
+
+    function collidesWithWall(x, y, size) {
+      const half = size / 2;
+      const minX = Math.floor((x - half) / tileSize);
+      const maxX = Math.floor((x + half) / tileSize);
+      const minY = Math.floor((y - half) / tileSize);
+      const maxY = Math.floor((y + half) / tileSize);
+      for (let tx = minX; tx <= maxX; tx++) {
+        for (let ty = minY; ty <= maxY; ty++) {
+          if (isWallTile(tx, ty)) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    function isNearCenter(entity) {
+      const centerX = Math.floor(entity.x / tileSize) * tileSize + tileSize / 2;
+      const centerY = Math.floor(entity.y / tileSize) * tileSize + tileSize / 2;
+      return Math.abs(entity.x - centerX) < 3 && Math.abs(entity.y - centerY) < 3;
+    }
+
+    function tryPendingDirection() {
+      if (!player.pendingDir) return;
+      const dir = player.pendingDir;
+      if (player.dirX === -dir.x && player.dirY === -dir.y) {
+        player.dirX = dir.x;
+        player.dirY = dir.y;
+        player.pendingDir = null;
+        return;
+      }
+      if (isNearCenter(player)) {
+        const lookAheadX = player.x + dir.x * (player.size / 2 + 2);
+        const lookAheadY = player.y + dir.y * (player.size / 2 + 2);
+        if (!collidesWithWall(lookAheadX, lookAheadY, player.size)) {
+          player.x = Math.floor(player.x / tileSize) * tileSize + tileSize / 2;
+          player.y = Math.floor(player.y / tileSize) * tileSize + tileSize / 2;
+          player.dirX = dir.x;
+          player.dirY = dir.y;
+          player.pendingDir = null;
+        }
+      }
+    }
+
+    function updatePlayer(delta) {
+      tryPendingDirection();
+      const step = player.speed * delta;
+      const proposedX = player.x + player.dirX * step;
+      if (!collidesWithWall(proposedX, player.y, player.size)) {
+        player.x = proposedX;
+      } else {
+        player.x = snapToTileCenter(player.x);
+        player.dirX = 0;
+      }
+      const proposedY = player.y + player.dirY * step;
+      if (!collidesWithWall(player.x, proposedY, player.size)) {
+        player.y = proposedY;
+      } else {
+        player.y = snapToTileCenter(player.y);
+        player.dirY = 0;
+      }
+      if (player.dirX || player.dirY) {
+        player.facingX = player.dirX || player.facingX;
+        player.facingY = player.dirY || player.facingY;
+      }
+      collectGem();
+      checkApplePickup();
+    }
+
+    function collectGem() {
+      const tile = getTileCoord(player.x, player.y);
+      const key = `${tile.x},${tile.y}`;
+      if (gemMap.has(key)) {
+        const gem = gemMap.get(key);
+        gemMap.delete(key);
+        state.score += gem.value;
+        setMessage(`${gem.name}! +${gem.value}`);
+        updateHUD();
+        if (gemMap.size === 0 && state.mode === "play") {
+          state.mode = "win";
+          setMessage("All gemstones devoured! Press Space to restart.", 9999);
+        }
+      }
+    }
+
+    function enablePowerMode() {
+      state.powerTimer = POWER_DURATION;
+      setMessage("Power apple! Ghosts taste spicy.", 200);
+      updateHUD();
+    }
+
+    function checkApplePickup() {
+      if (!apple.available) return;
+      const tile = getTileCoord(player.x, player.y);
+      if (tile.x === apple.tile.x && tile.y === apple.tile.y) {
+        apple.available = false;
+        apple.respawnTimer = APPLE_RESPAWN;
+        enablePowerMode();
+      }
+    }
+
+    function isCenteredOnTile(entity) {
+      return (
+        Math.abs((entity.x % tileSize) - tileSize / 2) < 1 &&
+        Math.abs((entity.y % tileSize) - tileSize / 2) < 1
+      );
+    }
+
+    function canMove(entity, dir) {
+      const futureX = entity.x + dir.x * tileSize * 0.6;
+      const futureY = entity.y + dir.y * tileSize * 0.6;
+      return !collidesWithWall(futureX, futureY, entity.size - 6);
+    }
+
+    function updateGhosts(delta) {
+      ghosts.forEach((ghost) => {
+        if (isCenteredOnTile(ghost)) {
+          const options = DIRS.filter((dir) => canMove(ghost, dir));
+          if (options.length) {
+            const playerTile = getTileCoord(player.x, player.y);
+            let best = null;
+            options.forEach((dir) => {
+              const nextTile = getTileCoord(
+                ghost.x + dir.x * tileSize,
+                ghost.y + dir.y * tileSize
+              );
+              const dist =
+                Math.abs(nextTile.x - playerTile.x) + Math.abs(nextTile.y - playerTile.y);
+              if (!best || dist < best.dist - 0.1 || (dist === best.dist && Math.random() < 0.5)) {
+                best = { dir, dist };
+              }
+            });
+            ghost.dirX = best.dir.x;
+            ghost.dirY = best.dir.y;
+          }
+        }
+
+        const fearFactor = state.powerTimer > 0 ? 0.65 : 1;
+        const move = ghost.speed * fearFactor * delta;
+        const nextX = ghost.x + ghost.dirX * move;
+        if (!collidesWithWall(nextX, ghost.y, ghost.size - 4)) {
+          ghost.x = nextX;
+        } else {
+          ghost.dirX *= -1;
+        }
+        const nextY = ghost.y + ghost.dirY * move;
+        if (!collidesWithWall(ghost.x, nextY, ghost.size - 4)) {
+          ghost.y = nextY;
+        } else {
+          ghost.dirY *= -1;
+        }
+      });
+    }
+
+    function checkGhostCollisions() {
+      if (hitCooldown > 0 || state.mode !== "play") return;
+      const powered = state.powerTimer > 0;
+      for (const ghost of ghosts) {
+        const distance = Math.hypot(ghost.x - player.x, ghost.y - player.y);
+        if (distance < (ghost.size + player.size) / 2 - 2) {
+          if (powered) {
+            respawnGhost(ghost);
+            state.score += GHOST_EAT_SCORE;
+            setMessage("Ghost chomped! +" + GHOST_EAT_SCORE, 120);
+            updateHUD();
+          } else {
+            hitCooldown = 60;
+            state.lives -= 1;
+            updateHUD();
+            if (state.lives <= 0) {
+              state.mode = "over";
+              setMessage("Ghosts caught you! Press Space to restart.", 9999);
+            } else {
+              setMessage("Zapped! Watch the ghosts.", 200);
+              resetPositions();
+            }
+            break;
+          }
+        }
+      }
+    }
+
+    function drawBoard() {
+      ctx.fillStyle = colors.floor;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.strokeStyle = "rgba(255,255,255,0.03)";
+      for (let x = 0; x <= canvas.width; x += tileSize) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.height);
+        ctx.stroke();
+      }
+      for (let y = 0; y <= canvas.height; y += tileSize) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(canvas.width, y);
+        ctx.stroke();
+      }
+      for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+          if (board[y][x] === "#") {
+            ctx.fillStyle = colors.wall;
+            ctx.fillRect(x * tileSize, y * tileSize, tileSize, tileSize);
+            ctx.strokeStyle = colors.wallEdge;
+            ctx.strokeRect(x * tileSize + 2, y * tileSize + 2, tileSize - 4, tileSize - 4);
+          }
+        }
+      }
+    }
+
+    function drawGems() {
+      gemMap.forEach((gem, key) => {
+        const [tx, ty] = key.split(",").map(Number);
+        const centerX = tileToPixel(tx);
+        const centerY = tileToPixel(ty);
+        ctx.fillStyle = gem.color;
+        ctx.beginPath();
+        ctx.moveTo(centerX, centerY);
+        ctx.arc(centerX, centerY, gem.radius, -Math.PI / 6, (Math.PI * 5) / 6);
+        ctx.lineTo(centerX, centerY);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(0,0,0,0.35)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      });
+    }
+
+    function drawPlayer() {
+      const angle = Math.atan2(player.facingY, player.facingX) || 0;
+      mouthTicker += 0.1;
+      const mouth = 0.25 + Math.abs(Math.sin(mouthTicker)) * 0.2;
+      ctx.fillStyle = colors.pacman;
+      ctx.beginPath();
+      ctx.moveTo(player.x, player.y);
+      ctx.arc(player.x, player.y, player.size / 2, angle + mouth, angle - mouth + Math.PI * 2, false);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function drawGhosts() {
+      ghosts.forEach((ghost) => {
+        const radius = ghost.size / 2;
+        const frightened = state.powerTimer > 0;
+        ctx.fillStyle = frightened ? "#8fd1ff" : ghost.color;
+        ctx.beginPath();
+        ctx.arc(ghost.x, ghost.y - radius / 3, radius, Math.PI, 0);
+        ctx.lineTo(ghost.x + radius, ghost.y + radius);
+        ctx.lineTo(ghost.x - radius, ghost.y + radius);
+        ctx.closePath();
+        ctx.fill();
+
+        // eyes
+        const eyeOffsetX = 6 * Math.sign(ghost.dirX || 1);
+        ctx.fillStyle = colors.ghostEye;
+        ctx.beginPath();
+        ctx.ellipse(ghost.x - eyeOffsetX / 2, ghost.y - radius / 4, 5, 7, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.ellipse(ghost.x + eyeOffsetX / 2, ghost.y - radius / 4, 5, 7, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = colors.ghostPupil;
+        ctx.beginPath();
+        ctx.arc(ghost.x - eyeOffsetX / 2, ghost.y - radius / 4, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(ghost.x + eyeOffsetX / 2, ghost.y - radius / 4, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+
+    function updateMessage(delta) {
+      if (messageTimer > 0) {
+        messageTimer -= delta;
+        if (messageTimer <= 0 && state.mode === "play") {
+          state.message = defaultMessage;
+          updateHUD();
+        }
+      }
+    }
+
+    function updatePowerTimer(delta) {
+      if (state.powerTimer > 0) {
+        state.powerTimer = Math.max(0, state.powerTimer - delta);
+        if (state.powerTimer === 0 && state.mode === "play") {
+          setMessage("Power faded. Stay sharp!", 120);
+        }
+      }
+    }
+
+    function updateApple(delta) {
+      if (apple.available) {
+        apple.phase += delta * 0.2;
+        apple.bob = Math.sin(apple.phase) * 6;
+        apple.spin = Math.sin(apple.phase * 1.5) * 0.3;
+      } else if (apple.respawnTimer > 0) {
+        apple.respawnTimer -= delta;
+        if (apple.respawnTimer <= 0) {
+          resetApple();
+        }
+      }
+    }
+
+    function drawApple() {
+      if (!apple.available) return;
+      const centerX = tileToPixel(apple.tile.x);
+      const centerY = tileToPixel(apple.tile.y) + apple.bob;
+      ctx.save();
+      ctx.translate(centerX, centerY);
+      ctx.rotate(apple.spin);
+      ctx.fillStyle = "#ff2d2d";
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 20, 24, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "#552200";
+      ctx.fillRect(-2, -26, 4, 10);
+
+      ctx.fillStyle = "#5ee35e";
+      ctx.beginPath();
+      ctx.moveTo(2, -26);
+      ctx.quadraticCurveTo(14, -36, 18, -18);
+      ctx.quadraticCurveTo(6, -20, 2, -26);
+      ctx.fill();
+
+      ctx.strokeStyle = "#ffdede";
+      ctx.lineWidth = 3;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(-12, 5);
+      ctx.lineTo(-22, 15 + Math.sin(apple.phase * 2) * 4);
+      ctx.moveTo(12, 5);
+      ctx.lineTo(22, 15 - Math.sin(apple.phase * 2) * 4);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(-8, 24);
+      ctx.lineTo(-10, 34);
+      ctx.moveTo(8, 24);
+      ctx.lineTo(10, 36);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function updateCat(delta) {
+      cat.phase += delta * 0.15;
+      cat.tail = Math.sin(cat.phase * 2) * 8;
+      cat.blinkTimer -= delta;
+      if (cat.blinkTimer <= 0) {
+        cat.eyesClosed = !cat.eyesClosed;
+        cat.blinkTimer = cat.eyesClosed ? 20 : 240 + Math.random() * 120;
+      }
+    }
+
+    function drawCat() {
+      const centerX = tileToPixel(cat.tile.x);
+      const centerY = tileToPixel(cat.tile.y);
+      ctx.save();
+      ctx.translate(centerX, centerY);
+      ctx.fillStyle = "#2c2c2c";
+      ctx.beginPath();
+      ctx.ellipse(0, 8, 26, 14, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // tail
+      ctx.strokeStyle = "#2c2c2c";
+      ctx.lineWidth = 6;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(20, 8);
+      ctx.quadraticCurveTo(36, 4 + cat.tail * 0.05, 28, -8 + cat.tail);
+      ctx.stroke();
+
+      // head
+      ctx.fillStyle = "#3c3c3c";
+      ctx.beginPath();
+      ctx.arc(0, -10, 18, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(-12, -20);
+      ctx.lineTo(-20, -34);
+      ctx.lineTo(-2, -24);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(12, -20);
+      ctx.lineTo(20, -34);
+      ctx.lineTo(2, -24);
+      ctx.closePath();
+      ctx.fill();
+
+      // face
+      ctx.fillStyle = "#ffd166";
+      if (cat.eyesClosed) {
+        ctx.strokeStyle = "#ffd166";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(-8, -10);
+        ctx.lineTo(-2, -8);
+        ctx.moveTo(8, -10);
+        ctx.lineTo(2, -8);
+        ctx.stroke();
+      } else {
+        ctx.beginPath();
+        ctx.arc(-8, -12, 3, 0, Math.PI * 2);
+        ctx.arc(8, -12, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = "#ff6b6b";
+      ctx.beginPath();
+      ctx.arc(0, -4, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function updateBanana(delta) {
+      banana.sway += delta * 0.05;
+      banana.sipTimer -= delta;
+      if (banana.sipTimer <= 0) {
+        banana.sipping = !banana.sipping;
+        banana.sipTimer = banana.sipping ? 60 + Math.random() * 40 : 140 + Math.random() * 80;
+      }
+    }
+
+    function drawBanana() {
+      const centerX = tileToPixel(banana.tile.x);
+      const centerY = tileToPixel(banana.tile.y);
+      const bob = Math.sin(banana.sway) * 2;
+      ctx.save();
+      ctx.translate(centerX, centerY + bob);
+      ctx.rotate(Math.sin(banana.sway) * 0.08);
+      ctx.fillStyle = "#ffe066";
+      ctx.beginPath();
+      ctx.moveTo(-6, -26);
+      ctx.bezierCurveTo(20, -22, 28, 26, -2, 30);
+      ctx.bezierCurveTo(-16, 18, -16, -18, -6, -26);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = "#ffd23f";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+
+      ctx.strokeStyle = "#fff4a3";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(-1, -20);
+      ctx.lineTo(10, 22);
+      ctx.stroke();
+
+      ctx.fillStyle = "#2f1b0c";
+      ctx.beginPath();
+      ctx.arc(-4, -4, 2.2, 0, Math.PI * 2);
+      ctx.arc(6, -6, 2.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#ff8fa3";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(1, 2, 4, 0, Math.PI);
+      ctx.stroke();
+      ctx.restore();
+
+      // boba cup
+      const cupX = centerX + 36;
+      const cupY = centerY + 18;
+      ctx.save();
+      ctx.translate(cupX, cupY);
+      ctx.fillStyle = "rgba(255,255,255,0.8)";
+      ctx.beginPath();
+      ctx.moveTo(-14, -30);
+      ctx.lineTo(14, -30);
+      ctx.lineTo(10, 12);
+      ctx.lineTo(-10, 12);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = "rgba(255,188,140,0.85)";
+      ctx.fillRect(-12, -6, 20, 12);
+      ctx.fillStyle = "#3f2a23";
+      [ -8, -2, 4, 8 ].forEach((offset) => {
+        ctx.beginPath();
+        ctx.arc(offset, 2, 3, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      ctx.restore();
+
+      ctx.strokeStyle = "#f4748a";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(centerX + 8, centerY - 2);
+      ctx.lineTo(cupX - 8, cupY - 30);
+      ctx.stroke();
+
+      if (banana.sipping) {
+        ctx.fillStyle = "rgba(255,255,255,0.8)";
+        ctx.beginPath();
+        ctx.arc(cupX - 8, cupY - 32, 5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function gameLoop(timestamp) {
+      if (!lastTime) lastTime = timestamp;
+      const delta = (timestamp - lastTime) / (1000 / 60);
+      lastTime = timestamp;
+
+      if (state.mode === "play") {
+        updatePlayer(delta);
+        updateGhosts(delta);
+        checkGhostCollisions();
+      } else {
+        mouthTicker += 0.05 * delta;
+      }
+
+      if (hitCooldown > 0) {
+        hitCooldown -= delta;
+      }
+
+      updatePowerTimer(delta);
+      updateMessage(delta);
+      updateApple(delta);
+      updateCat(delta);
+      updateBanana(delta);
+      drawBoard();
+      drawGems();
+      drawApple();
+      drawCat();
+      drawBanana();
+      drawGhosts();
+      drawPlayer();
+
+      requestAnimationFrame(gameLoop);
+    }
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === " ") {
+        event.preventDefault();
+        if (state.mode !== "play") {
+          startNewGame();
+        }
+        return;
+      }
+      const dir = keyToDir[event.key];
+      if (dir) {
+        event.preventDefault();
+        player.pendingDir = dir;
+      }
+    });
+
+    startNewGame();
+    updateHUD();
+    requestAnimationFrame(gameLoop);
+  </script>
+</body>
+</html>
